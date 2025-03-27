@@ -20,13 +20,14 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"fmt"
-	"github.com/openziti/sdk-golang/ziti"
 	"github.com/pkg/errors"
 	"io"
 	"net"
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/openziti/sdk-golang/ziti"
 )
 
 // BindPointConfig represents the interface:port address of where a http.Server should listen for a ServerConfig and the public
