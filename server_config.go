@@ -156,8 +156,10 @@ func (config *ServerConfig) Validate(registry Registry) error {
 	}
 
 	for i, address := range config.BindPoints {
-		if err := address.Validate(); err != nil {
-			return fmt.Errorf("invalid address at index [%d]: %v", i, err)
+		if len(address.Identity.Identity) == 0 {
+			if err := address.Validate(); err != nil {
+				return fmt.Errorf("invalid address at index [%d]: %v", i, err)
+			}
 		}
 	}
 

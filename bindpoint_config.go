@@ -17,9 +17,14 @@
 package xweb
 
 import (
+	"crypto/tls"
+	"encoding/base64"
 	"fmt"
+	"github.com/openziti/sdk-golang/ziti"
 	"github.com/pkg/errors"
+	"io"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 )
@@ -30,28 +35,83 @@ type BindPointConfig struct {
 	InterfaceAddress string //<interface>:<port>
 	Address          string //<ip/host>:<port>
 	NewAddress       string //<ip/host>:<port> sent out as a header for clients to alternatively swap to (ip -> hostname moves)
+	Identity         IdentityConfig
+}
+
+type IdentityConfig struct {
+	Identity       []byte //an openziti identity
+	Service        string //name of the service to bind
+	Opts           ziti.ListenOptions
+	ClientAuthType tls.ClientAuthType
 }
 
 // Parse the configuration map for a BindPointConfig.
 func (bindPoint *BindPointConfig) Parse(config map[interface{}]interface{}) error {
-	if interfaceVal, ok := config["interface"]; ok {
-		if address, ok := interfaceVal.(string); ok {
-			bindPoint.InterfaceAddress = address
-		} else {
-			return fmt.Errorf("could not use value for address, not a string")
+	if identityVal, ok := config["identity"]; ok {
+		identCfg := identityVal.(map[interface{}]interface{})
+		if fileVal, ok := identCfg["file"]; ok {
+			if file, ok := fileVal.(string); ok {
+				var err error
+				bindPoint.Identity.Identity, err = os.ReadFile(file)
+				if err != nil {
+					return err
+				}
+			}
+		}
+		if envValCfg, ok := identCfg["env"]; ok {
+			b64Id := os.Getenv(envValCfg.(string))
+			idReader := base64.NewDecoder(base64.StdEncoding, strings.NewReader(b64Id))
+			var err error
+			bindPoint.Identity.Identity, err = io.ReadAll(idReader)
+			if err != nil {
+				return err
+			}
+		}
+		if serviceVal, ok := identCfg["service"]; ok {
+			if service, ok := serviceVal.(string); ok {
+				bindPoint.Identity.Service = service
+			}
+		}
+		if certRequired, ok := identCfg["clientCertRequired"].(string); ok {
+			switch strings.ToLower(certRequired) {
+			case "noclientcert":
+				bindPoint.Identity.ClientAuthType = tls.NoClientCert
+			case "requestclientcert":
+				bindPoint.Identity.ClientAuthType = tls.RequestClientCert
+			case "requireanyclientcert":
+				bindPoint.Identity.ClientAuthType = tls.RequireAnyClientCert
+			case "verifyclientcertifgiven":
+				bindPoint.Identity.ClientAuthType = tls.VerifyClientCertIfGiven
+			case "requireandverifyclientcert":
+				bindPoint.Identity.ClientAuthType = tls.RequireAndVerifyClientCert
+			default:
+				bindPoint.Identity.ClientAuthType = tls.VerifyClientCertIfGiven
+			}
+		}
+		if listenOptsCfg, ok := identCfg["listenOptions"]; ok {
+			optsCfg := listenOptsCfg.(map[interface{}]interface{})
+			if asId, ok := optsCfg["bindUsingEdgeIdentity"].(bool); ok {
+				bindPoint.Identity.Opts.BindUsingEdgeIdentity = asId
+			}
 		}
 	}
 
-	if interfaceVal, ok := config["address"]; ok {
+	if interfaceVal, ok := config["interface"]; ok {
 		if address, ok := interfaceVal.(string); ok {
+			bindPoint.InterfaceAddress = address
+		}
+	}
+
+	if addressVal, ok := config["address"]; ok {
+		if address, ok := addressVal.(string); ok {
 			bindPoint.Address = address
 		} else {
 			return errors.New("could not use value for address, not a string")
 		}
 	}
 
-	if interfaceVal, ok := config["newAddress"]; ok {
-		if address, ok := interfaceVal.(string); ok {
+	if newAddressVal, ok := config["newAddress"]; ok {
+		if address, ok := newAddressVal.(string); ok {
 			bindPoint.NewAddress = address
 		} else {
 			return errors.New("could not use value for newAddress, not a string")
@@ -112,4 +172,11 @@ func validateHostPort(address string) error {
 	}
 
 	return nil
+}
+
+func (bindPoint *BindPointConfig) Underlay() bool {
+	return len(bindPoint.Identity.Identity) == 0
+}
+func (bindPoint *BindPointConfig) Overlay() bool {
+	return len(bindPoint.Identity.Identity) > 0
 }

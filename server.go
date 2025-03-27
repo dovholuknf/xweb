@@ -17,15 +17,17 @@
 package xweb
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/michaelquigley/pfxlog"
 	"github.com/openziti/foundation/v2/debugz"
+	"github.com/openziti/sdk-golang/ziti"
 	transporttls "github.com/openziti/transport/v2/tls"
 	"github.com/openziti/xweb/v2/middleware"
-	"io"
 	"log"
 	"net"
 	"net/http"
@@ -68,7 +70,7 @@ func (s namedHttpServer) NewBaseContext(_ net.Listener) context.Context {
 type Server struct {
 	DefaultHttpHandlerProviderImpl
 	httpServers    []*namedHttpServer
-	logWriter      *io.PipeWriter
+	logWriter      *filteredLogger
 	options        *ServerConfigOptions
 	config         interface{}
 	Handle         http.Handler
@@ -76,10 +78,25 @@ type Server struct {
 	ServerConfig   *ServerConfig
 }
 
+type filteredLogger struct {
+	base *log.Logger
+}
+
+func (f *filteredLogger) Close() error {
+	return pfxlog.Logger().Writer().Close()
+}
+
+func (f *filteredLogger) Write(p []byte) (int, error) {
+	if bytes.HasSuffix(p, []byte("remote error: tls: unknown certificate\n")) {
+		return len(p), nil // suppress
+	}
+	return pfxlog.Logger().Writer().Write(p)
+}
+
 // NewServer creates a new Server from a ServerConfig. All necessary http.Handler's will be created from the supplied
 // DemuxFactory and Registry.
 func NewServer(instance Instance, serverConfig *ServerConfig) (*Server, error) {
-	logWriter := pfxlog.Logger().Writer()
+	logWriter := &filteredLogger{}
 
 	tlsConfig := serverConfig.Identity.ServerTLSConfig()
 	tlsConfig.ClientAuth = tls.RequestClientCert
@@ -126,7 +143,6 @@ func NewServer(instance Instance, serverConfig *ServerConfig) (*Server, error) {
 			BindPointConfig: bindPoint,
 			InstanceConfig:  instance.GetConfig(),
 			Server: &http.Server{
-				Addr:         bindPoint.InterfaceAddress,
 				WriteTimeout: serverConfig.Options.WriteTimeout,
 				ReadTimeout:  serverConfig.Options.ReadTimeout,
 				IdleTimeout:  serverConfig.Options.IdleTimeout,
@@ -135,9 +151,11 @@ func NewServer(instance Instance, serverConfig *ServerConfig) (*Server, error) {
 				ErrorLog:     log.New(logWriter, "", 0),
 			},
 		}
+		if bindPoint.Address != "" {
+			namedServer.Addr = bindPoint.InterfaceAddress
+		}
 
 		namedServer.BaseContext = namedServer.NewBaseContext
-
 		server.httpServers = append(server.httpServers, namedServer)
 	}
 
@@ -189,24 +207,61 @@ func (server *Server) wrapSetCtrlAddressHeader(point *BindPointConfig, handler h
 	return wrappedHandler
 }
 
+func (ns *namedHttpServer) OverlayListener() (net.Listener, error) {
+	i := ns.BindPointConfig.Identity
+	cfg := ziti.Config{}
+	err := json.Unmarshal(i.Identity, &cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	ctx, err := ziti.NewContext(&cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	listener, err := ctx.ListenWithOptions(i.Service, &i.Opts)
+	if err != nil {
+		return nil, err
+	}
+	return listener, nil
+}
+
 // Start the server and all underlying http.Server's
 func (server *Server) Start() error {
 	logger := pfxlog.Logger()
 
 	for _, httpServer := range server.httpServers {
-		logger.Infof("starting ApiConfig to listen and serve tls on %s for server %s with APIs: %v", httpServer.Addr, httpServer.ServerConfig.Name, httpServer.ApiBindingList)
+		logger.Infof("starting ApiConfig %s to listen and serve tls on %s for server %s with APIs: %v", httpServer.ServerConfig.Name, httpServer.Addr, httpServer.ServerConfig.Name, httpServer.ApiBindingList)
 
 		cfg := httpServer.TLSConfig
 		// make sure to listen to the expected protocols
 		cfg.NextProtos = append(cfg.NextProtos, "h2", "http/1.1", "")
-		l, err := transporttls.ListenTLS(httpServer.Addr, httpServer.ServerConfig.Name, cfg)
-		if err != nil {
-			return fmt.Errorf("error listening: %s", err)
-		}
-		err = httpServer.Serve(l)
 
-		if !errors.Is(err, http.ErrServerClosed) {
-			return fmt.Errorf("error listening: %s", err)
+		if len(httpServer.BindPointConfig.Identity.Identity) > 0 {
+			l, err := httpServer.OverlayListener()
+			if err != nil {
+				return fmt.Errorf("error listening on overlay: %s", err)
+			}
+
+			tlsCfg := server.ServerConfig.Identity.ServerTLSConfig()
+			tlsCfg.ClientAuth = httpServer.BindPointConfig.Identity.ClientAuthType
+			tlsListener := tls.NewListener(l, tlsCfg)
+			err = httpServer.Serve(tlsListener)
+
+			if !errors.Is(err, http.ErrServerClosed) {
+				return fmt.Errorf("error listening: %s", err)
+			}
+		} else {
+			l, err := transporttls.ListenTLS(httpServer.Addr, httpServer.ServerConfig.Name, cfg)
+			if err != nil {
+				return fmt.Errorf("error listening on underlay: %s", err)
+			}
+			err = httpServer.Serve(l)
+
+			if !errors.Is(err, http.ErrServerClosed) {
+				return fmt.Errorf("error listening: %s", err)
+			}
 		}
 	}
 
