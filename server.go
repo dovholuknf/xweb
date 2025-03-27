@@ -238,30 +238,27 @@ func (server *Server) Start() error {
 		// make sure to listen to the expected protocols
 		cfg.NextProtos = append(cfg.NextProtos, "h2", "http/1.1", "")
 
+		var l net.Listener
 		if len(httpServer.BindPointConfig.Identity.Identity) > 0 {
-			l, err := httpServer.OverlayListener()
+			ol, err := httpServer.OverlayListener()
 			if err != nil {
 				return fmt.Errorf("error listening on overlay: %s", err)
 			}
 
 			tlsCfg := server.ServerConfig.Identity.ServerTLSConfig()
 			tlsCfg.ClientAuth = httpServer.BindPointConfig.Identity.ClientAuthType
-			tlsListener := tls.NewListener(l, tlsCfg)
-			err = httpServer.Serve(tlsListener)
-
-			if !errors.Is(err, http.ErrServerClosed) {
-				return fmt.Errorf("error listening: %s", err)
-			}
+			tlsListener := tls.NewListener(ol, tlsCfg)
+			l = tlsListener
 		} else {
-			l, err := transporttls.ListenTLS(httpServer.Addr, httpServer.ServerConfig.Name, cfg)
+			ul, err := transporttls.ListenTLS(httpServer.Addr, httpServer.ServerConfig.Name, cfg)
 			if err != nil {
 				return fmt.Errorf("error listening on underlay: %s", err)
 			}
-			err = httpServer.Serve(l)
-
-			if !errors.Is(err, http.ErrServerClosed) {
-				return fmt.Errorf("error listening: %s", err)
-			}
+			l = ul
+		}
+		err := httpServer.Serve(l)
+		if !errors.Is(err, http.ErrServerClosed) {
+			return fmt.Errorf("error listening: %s", err)
 		}
 	}
 
