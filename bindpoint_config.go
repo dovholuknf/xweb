@@ -73,7 +73,7 @@ func (bindPoint *BindPointConfig) Parse(config map[interface{}]interface{}) erro
 				bindPoint.Identity.Service = service
 			}
 		}
-		if certRequired, ok := identCfg["clientCertRequired"].(string); ok {
+		if certRequired, ok := identCfg["tlsClientAuthenticationPolicy"].(string); ok {
 			switch strings.ToLower(certRequired) {
 			case "noclientcert":
 				bindPoint.Identity.ClientAuthType = tls.NoClientCert

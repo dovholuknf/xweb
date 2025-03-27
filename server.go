@@ -249,6 +249,9 @@ func (server *Server) Start() error {
 			tlsCfg.ClientAuth = httpServer.BindPointConfig.Identity.ClientAuthType
 			tlsListener := tls.NewListener(ol, tlsCfg)
 			l = tlsListener
+			if tlsCfg.ClientAuth < tls.VerifyClientCertIfGiven {
+				logger.Warnf("The configured certificate verification method [%d] will not support mutual TLS", tlsCfg.ClientAuth)
+			}
 		} else {
 			ul, err := transporttls.ListenTLS(httpServer.Addr, httpServer.ServerConfig.Name, cfg)
 			if err != nil {
